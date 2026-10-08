@@ -595,11 +595,12 @@ renderHistory();
 const SCORE_MIN = 0.3;
 const cl01 = v => Math.max(0, Math.min(1, v));
 
-function toMap(kps) {
+function toMap(kps, minScore) {
     const m = {};
+    minScore = typeof minScore === 'number' ? minScore : SCORE_MIN;
     for (let i = 0; i < kps.length; i++) {
         const k = kps[i];
-        if (k && k.score >= SCORE_MIN) m[k.name] = k;
+        if (k && k.score >= minScore) m[k.name] = k;
     }
     return m;
 }
@@ -2154,7 +2155,7 @@ function startExercise(withCamera, cameraAccess) {
         function seatedCircuit(map) {
             const w = scale(map);
             if (!bodyVisible(map, false)) return F('請將肩膀、臀部和膝頭放入鏡頭');
-            if (circuitStage === 0 && (!map.left_elbow || !map.right_elbow)) return F('請將雙手手肘放入鏡頭');
+            if (circuitStage === 0 && !map.left_elbow && !map.right_elbow) return F('請將手肘放入鏡頭，試試退後少少');
             if ((circuitStage === 1 || circuitStage === 4) && (!map.left_ankle || !map.right_ankle)) {
                 return F('請將雙腳放入鏡頭');
             }
@@ -2217,25 +2218,46 @@ function startExercise(withCamera, cameraAccess) {
                     rightKneeY: map.right_knee.y,
                     leftKneeAngle: jointAngle(map.left_hip, map.left_knee, map.left_ankle),
                     rightKneeAngle: jointAngle(map.right_hip, map.right_knee, map.right_ankle),
-                    leftElbowKneeDistance: Math.hypot(map.right_elbow.x - map.left_knee.x, map.right_elbow.y - map.left_knee.y),
-                    rightElbowKneeDistance: Math.hypot(map.left_elbow.x - map.right_knee.x, map.left_elbow.y - map.right_knee.y)
+                    leftElbowKneeDistance: map.right_elbow ? Math.hypot(map.right_elbow.x - map.left_knee.x, map.right_elbow.y - map.left_knee.y) : null,
+                    rightElbowKneeDistance: map.left_elbow ? Math.hypot(map.left_elbow.x - map.right_knee.x, map.left_elbow.y - map.right_knee.y) : null
                 };
             }
             let movementStarted = false, movementReturned = false, cue = '';
             if (circuitStage === 0) {
-                const knee = map[circuitSide + '_knee'];
-                const otherElbow = map[circuitSide === 'left' ? 'right_elbow' : 'left_elbow'];
-                const baseKneeY = circuitBaseline[circuitSide + 'KneeY'];
-                const distance = Math.hypot(otherElbow.x - knee.x, otherElbow.y - knee.y);
-                const baseDistance = circuitBaseline[circuitSide + 'ElbowKneeDistance'];
-                const kneeLift = baseKneeY - knee.y;
-                const elbowApproach = baseDistance - distance;
-                movementStarted = kneeLift > w * .04 && elbowApproach > w * .035;
-                movementReturned = Math.abs(knee.y - baseKneeY) < w * .075 &&
-                    Math.abs(distance - baseDistance) < w * .08;
+                const attempts = ['left', 'right'].map(function (side) {
+                    const knee = map[side + '_knee'];
+                    const elbow = map[side === 'left' ? 'right_elbow' : 'left_elbow'];
+                    const baseKneeY = circuitBaseline[side + 'KneeY'];
+                    const baseDistance = circuitBaseline[side + 'ElbowKneeDistance'];
+                    if (!elbow || baseDistance === null) return null;
+                    const distance = Math.hypot(elbow.x - knee.x, elbow.y - knee.y);
+                    const kneeLift = baseKneeY - knee.y;
+                    const elbowApproach = baseDistance - distance;
+                    return {
+                        side: side,
+                        knee: knee,
+                        baseKneeY: baseKneeY,
+                        distance: distance,
+                        baseDistance: baseDistance,
+                        kneeLift: kneeLift,
+                        elbowApproach: elbowApproach,
+                        score: kneeLift + elbowApproach
+                    };
+                }).filter(Boolean);
+                if (!attempts.length) return Object.assign(F('請將對側手肘放入鏡頭，再抬膝碰肘'), stageInfo());
+                if (circuitPhase === 'start') {
+                    const successfulAttempt = attempts.find(attempt =>
+                        attempt.kneeLift > w * .035 && attempt.elbowApproach > w * .015);
+                    if (successfulAttempt) circuitSide = successfulAttempt.side;
+                }
+                const attempt = attempts.find(candidate => candidate.side === circuitSide) || attempts[0];
+                movementStarted = attempts.some(candidate =>
+                    candidate.kneeLift > w * .035 && candidate.elbowApproach > w * .015);
+                movementReturned = Math.abs(attempt.knee.y - attempt.baseKneeY) < w * .09 &&
+                    Math.abs(attempt.distance - attempt.baseDistance) < w * .14;
                 if (circuitPhase === 'return') cue = '慢慢放低膝頭和手，回到坐直位置';
-                else if (kneeLift <= w * .04) cue = '慢慢抬起' + (circuitSide === 'left' ? '左' : '右') + '膝';
-                else cue = '用對側手肘再靠近膝頭一點';
+                else if (attempt.kneeLift <= w * .035) cue = '慢慢抬起一邊膝頭';
+                else cue = '用對側手肘靠近膝頭，再慢慢放低';
             } else if (circuitStage === 1) {
                 const angle = jointAngle(map[circuitSide + '_hip'], map[circuitSide + '_knee'], map[circuitSide + '_ankle']);
                 const baseAngle = circuitBaseline[circuitSide + 'KneeAngle'];
@@ -2611,6 +2633,11 @@ function startExercise(withCamera, cameraAccess) {
         if (exerciseWrap) exerciseWrap.classList.toggle('immersive', cameraMode);
         setPhaseChip('🏃 練習中');
         updateCarrotTargets();
+        updateEscapeHud(escapeProgress);
+        if (cameraMode && EXERCISES[idx].d === 'carrotPull' && !carrotTarget) {
+            spawnCarrotTarget(null);
+            updateCarrotTargets();
+        }
         setFormFeedback(cameraMode ? '📷 即時姿勢辨識已啟動；按提示調整動作' : '🎵 無鏡頭模式：跟住動畫慢慢做', 'idle');
         Speech.speak('開始，慢慢做。', { force: true });
         updateCounter();
@@ -2781,28 +2808,34 @@ function startExercise(withCamera, cameraAccess) {
     function spawnCarrotTarget(map) {
         const videoWidth = video.videoWidth || 960;
         const videoHeight = video.videoHeight || 720;
-        const shoulderWidth = Math.max(shW(map), 36);
-        const leftWrist = map.left_wrist, rightWrist = map.right_wrist;
-        if (!leftWrist || !rightWrist) return false;
+        const shoulderWidth = map ? Math.max(shW(map), 36) : 90;
         let choice = null;
-        for (let attempt = 0; attempt < 100; attempt++) {
-            const centerX = 1 - ((map.left_shoulder.x + map.right_shoulder.x) / 2) / videoWidth;
-            const centerY = ((map.left_shoulder.y + map.right_shoulder.y) / 2) / videoHeight;
-            const x = cl01(centerX + ((Math.random() * 2) - 1) * shoulderWidth * 3.1 / videoWidth);
-            const y = cl01(centerY + (.9 + Math.random() * 2.1) * shoulderWidth / videoHeight);
-            if (x < .1 || x > .9 || y < .52 || y > .86) continue;
-            const distances = {};
-            ['left', 'right'].forEach(function (side) {
-                const wrist = map[side + '_wrist'];
-                distances[side] = Math.hypot((1 - x) * videoWidth - wrist.x, y * videoHeight - wrist.y);
-            });
-            const reachable = Object.keys(distances).filter(side => distances[side] > shoulderWidth * .55 && distances[side] < shoulderWidth * 3.7);
-            if (reachable.length) {
-                choice = { x: x, y: y, initial: distances, rotten: Math.random() < 0.25 };
-                break;
+        if (map && map.left_shoulder && map.right_shoulder) {
+            for (let attempt = 0; attempt < 40; attempt++) {
+                const centerX = 1 - ((map.left_shoulder.x + map.right_shoulder.x) / 2) / videoWidth;
+                const centerY = ((map.left_shoulder.y + map.right_shoulder.y) / 2) / videoHeight;
+                const x = cl01(centerX + ((Math.random() * 2) - 1) * shoulderWidth * 3.1 / videoWidth);
+                const y = cl01(centerY + (.9 + Math.random() * 2.1) * shoulderWidth / videoHeight);
+                if (x < .1 || x > .9 || y < .52 || y > .86) continue;
+                const distances = {};
+                ['left', 'right'].forEach(function (side) {
+                    const wrist = map[side + '_wrist'];
+                    if (wrist) distances[side] = Math.hypot((1 - x) * videoWidth - wrist.x, y * videoHeight - wrist.y);
+                });
+                if (Object.keys(distances).length) {
+                    choice = { x: x, y: y, initial: distances, rotten: Math.random() < 0.25 };
+                    break;
+                }
             }
         }
-        if (!choice) return false;
+        if (!choice) {
+            choice = {
+                x: .2 + Math.random() * .6,
+                y: .57 + Math.random() * .23,
+                initial: null,
+                rotten: Math.random() < 0.25
+            };
+        }
         carrotTarget = choice;
         const target = document.getElementById('aiCarrotTarget');
         if (target) {
@@ -2825,12 +2858,23 @@ function startExercise(withCamera, cameraAccess) {
         const w = Math.max(shW(map), 36);
         const pointX = (1 - carrotTarget.x) * videoWidth;
         const pointY = carrotTarget.y * videoHeight;
+        if (!carrotTarget.initial) {
+            carrotTarget.initial = {};
+            ['left', 'right'].forEach(function (side) {
+                const wrist = map[side + '_wrist'];
+                if (wrist) carrotTarget.initial[side] = Math.hypot(pointX - wrist.x, pointY - wrist.y);
+            });
+        }
         let best = null;
         ['left', 'right'].forEach(function (side) {
             const wrist = map[side + '_wrist'];
             if (!wrist) return;
             const distance = Math.hypot(pointX - wrist.x, pointY - wrist.y);
-            const movedToward = carrotTarget.initial[side] - distance;
+            const initialDistance = typeof carrotTarget.initial[side] === 'number'
+                ? carrotTarget.initial[side]
+                : distance;
+            carrotTarget.initial[side] = initialDistance;
+            const movedToward = initialDistance - distance;
             if (!best || distance < best.distance) best = { distance: distance, movedToward: movedToward };
         });
         if (!best) return F('請讓雙手入鏡，伸手捉住蘿蔔');
@@ -3057,6 +3101,11 @@ function startExercise(withCamera, cameraAccess) {
             return;
         }
         const ex = EXERCISES[idx];
+        if (cameraMode && phase === 'practice' && ex.d === 'carrotPull' && !carrotTarget && now >= carrotSpawnAt) {
+            spawnCarrotTarget(null);
+            updateCarrotTargets();
+        }
+        if (cameraMode && phase === 'practice' && ex.d === 'obstacleEscape') updateEscapeHud(escapeProgress);
         if (cameraMode && phase === 'practice' && ex.d === 'obstacleEscape') {
             holdMs += Math.max(0, now - lastTick);
             lastTick = now;
@@ -3110,7 +3159,7 @@ function startExercise(withCamera, cameraAccess) {
             return;
         }
         lastPoseT = now;
-        const rawMap = toMap(poses[0].keypoints);
+        const rawMap = toMap(poses[0].keypoints, ex.d === 'seatedCircuit' ? 0.2 : SCORE_MIN);
         const map = smoother(rawMap);
 
         /* 講解階段：只做企位檢查，唔分析、唔計次 */
